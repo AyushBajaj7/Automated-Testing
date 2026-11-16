@@ -77,10 +77,19 @@ class DevToPlatform(BasePlatform):
                         "DEV.to did not confirm article publication."
                     )
 
-                public_access = await self.verify_public_access(
-                    client,
-                    posted_url,
-                )
+                article_id = data.get("id")
+                # Conclusive public verification via public article endpoint
+                try:
+                    verify_resp = await client.get(
+                        f"https://dev.to/api/articles/{article_id}",
+                        timeout=10.0,
+                    )
+                    public_access = verify_resp.is_success and verify_resp.json().get("published") is True
+                except (httpx.TimeoutException, httpx.RequestError):
+                    public_access = await self.verify_public_access(
+                        client,
+                        posted_url,
+                    )
                 result = self.success(
                     url=posted_url,
                     public_access=public_access,

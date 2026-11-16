@@ -1,12 +1,12 @@
 import re
 from ipaddress import ip_address
 from urllib.parse import urlsplit
-from typing import Optional, Any
-from pydantic import BaseModel, Field, ConfigDict, field_validator
+from pydantic import BaseModel, Field, ConfigDict, field_validator, TypeAdapter, HttpUrl, ValidationError
 
 URL_PATTERN = re.compile(
     r"https?://[^\s<>\"']+", re.IGNORECASE
 )
+URL_ADAPTER = TypeAdapter(HttpUrl)
 
 
 class PostingRequest(BaseModel):
@@ -36,6 +36,12 @@ class PostingRequest(BaseModel):
 
         if any(char.isspace() for char in url):
             raise ValueError("URL cannot contain spaces.")
+
+        # Pydantic HttpUrl validation
+        try:
+            URL_ADAPTER.validate_python(url)
+        except ValidationError:
+            raise ValueError("Invalid URL: malformed URL format.")
 
         parsed = urlsplit(url)
 
@@ -71,29 +77,3 @@ class PostingRequest(BaseModel):
 
 # Alias for compatibility
 PostRequest = PostingRequest
-
-
-# Platform result schemas for downstream steps
-class PlatformResult(BaseModel):
-    platform: str
-    success: bool
-    published_url: Optional[str] = None
-    publicly_accessible: bool = False
-    date: str
-    time: str
-    error: Optional[str] = None
-    details: Optional[dict[str, Any]] = None
-
-
-class PostingSummary(BaseModel):
-    total: int
-    successful: int
-    failed: int
-
-
-class PostResponse(BaseModel):
-    message: str
-    cta_url: str
-    timestamp: str
-    summary: PostingSummary
-    results: dict[str, PlatformResult]

@@ -60,10 +60,18 @@ class MastodonPlatform(BasePlatform):
                         "Mastodon did not return a valid public post URL."
                     )
 
-                public_access = await self.verify_public_access(
-                    client,
-                    posted_url,
-                )
+                # Conclusive public verification via unauthenticated public status endpoint
+                try:
+                    verify_resp = await client.get(
+                        f"{base_url}/api/v1/statuses/{post_id}",
+                        timeout=10.0,
+                    )
+                    public_access = verify_resp.is_success and verify_resp.json().get("visibility") == "public"
+                except (httpx.TimeoutException, httpx.RequestError):
+                    public_access = await self.verify_public_access(
+                        client,
+                        posted_url,
+                    )
                 result = self.success(
                     url=posted_url,
                     public_access=public_access,

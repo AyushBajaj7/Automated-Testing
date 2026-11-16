@@ -26,6 +26,17 @@ class BasePlatform(ABC):
         if not url or not url.startswith("https://"):
             return False
         try:
+            # Optimization: Try HTTP HEAD probe first (zero-payload bandwidth optimization)
+            head_method = getattr(client, "head", None)
+            if callable(head_method):
+                try:
+                    head_resp = await client.head(url, follow_redirects=True, timeout=8.0)
+                    if head_resp.status_code == 200:
+                        return True
+                except (httpx.TimeoutException, httpx.RequestError):
+                    pass
+
+            # Fallback: Full HTTP GET probe
             response = await client.get(
                 url,
                 follow_redirects=True,

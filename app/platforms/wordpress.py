@@ -104,10 +104,18 @@ class WordPressPlatform(BasePlatform):
 
                 public_access = False
                 if normalize_host(posted_host) == normalize_host(base_host):
-                    public_access = await self.verify_public_access(
-                        client,
-                        posted_url,
-                    )
+                    # Conclusive public verification via public REST endpoint without credentials
+                    try:
+                        verify_resp = await client.get(
+                            f"{endpoint}/{post_id}",
+                            timeout=10.0,
+                        )
+                        public_access = verify_resp.is_success and verify_resp.json().get("status") == "publish"
+                    except (httpx.TimeoutException, httpx.RequestError):
+                        public_access = await self.verify_public_access(
+                            client,
+                            posted_url,
+                        )
 
                 result = self.success(
                     url=posted_url, public_access=public_access
