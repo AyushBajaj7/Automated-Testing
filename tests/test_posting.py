@@ -457,3 +457,82 @@ async def test_telegram_connector_api_failure(monkeypatch):
 
         assert result.status == "failed"
         assert "Telegram API request failed" in result.error or "Telegram rejected the message" in result.error
+
+
+# ============================================================================
+# Section C: Resilience & Algorithmic Unit Tests
+# ============================================================================
+
+def test_circuit_breaker_state_machine():
+    from app.services.circuit_breaker import CircuitBreaker, CircuitState
+    import time
+
+    cb = CircuitBreaker("TestService", failure_threshold=2, recovery_timeout=0.1)
+    assert cb.state == CircuitState.CLOSED
+    assert cb.can_execute() is True
+
+    # 1 failure -> stays closed
+    cb.record_failure()
+    assert cb.state == CircuitState.CLOSED
+    assert cb.can_execute() is True
+
+    # 2nd failure -> trips to OPEN
+    cb.record_failure()
+    assert cb.state == CircuitState.OPEN
+    assert cb.can_execute() is False
+
+    # After recovery timeout -> transitions to HALF_OPEN
+    time.sleep(0.15)
+    assert cb.can_execute() is True
+    assert cb.state == CircuitState.HALF_OPEN
+
+    # Success in half open -> resets to CLOSED
+    cb.record_success()
+    assert cb.state == CircuitState.CLOSED
+    assert cb.failure_count == 0
+
+
+@pytest.mark.asyncio
+async def test_publish_with_retry_and_backoff_transient_failure():
+    from app.services.posting_service import publish_with_retry_and_backoff
+
+    attempts = 0
+
+    class TransientFailPlatform(BasePlatform):
+        name = "TransientTest"
+        async def publish(self, message: str) -> PlatformResult:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise httpx.RequestError("Temporary network reset")
+            return self.success(url="https://example.com/recovered", public_access=True)
+
+    platform = TransientFailPlatform()
+    res = await publish_with_retry_and_backoff(
+        platform, "Test message https://example.com", max_retries=1, base_backoff=0.01
+    )
+
+    assert attempts == 2
+    assert res.status == "success"
+    assert res.posted_url == "https://example.com/recovered"
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_fast_fail_in_posting_service():
+    from app.services.posting_service import publish_safely, CIRCUIT_BREAKERS
+    from app.services.circuit_breaker import CircuitBreaker, CircuitState
+
+    cb = CircuitBreaker("FastFailTest", failure_threshold=1, recovery_timeout=60.0)
+    cb.state = CircuitState.OPEN
+    CIRCUIT_BREAKERS["FastFailTest"] = cb
+
+    class BreakerPlatform(BasePlatform):
+        name = "FastFailTest"
+        async def publish(self, message: str) -> PlatformResult:
+            return self.success("https://example.com/never-reached", True)
+
+    platform = BreakerPlatform()
+    result = await publish_safely(platform, "Check this https://example.com")
+
+    assert result.status == "failed"
+    assert "Circuit breaker is OPEN" in result.error
