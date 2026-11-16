@@ -47,8 +47,8 @@ class CircuitBreaker:
             return False
 
         if self.state == CircuitState.HALF_OPEN:
-            # In half-open, allow one probe through
-            return True
+            # Allow only the initial probe that transitioned the state; subsequent requests wait
+            return False
 
         return False
 

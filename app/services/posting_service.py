@@ -86,7 +86,8 @@ async def publish_safely(
     # 2. Bounded Concurrency Check: Limit simultaneous active outbound sockets
     try:
         async with GLOBAL_SEMAPHORE:
-            result = await publish_with_retry_and_backoff(platform, message, max_retries=1)
+            # Direct single-attempt execution prevents duplicate post creation on non-idempotent endpoints
+            result = await platform.publish(message)
 
         if result.status == "success":
             if breaker:

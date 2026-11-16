@@ -481,10 +481,11 @@ def test_circuit_breaker_state_machine():
     assert cb.state == CircuitState.OPEN
     assert cb.can_execute() is False
 
-    # After recovery timeout -> transitions to HALF_OPEN
+    # After recovery timeout -> transitions to HALF_OPEN on first call, blocks subsequent probes
     time.sleep(0.15)
     assert cb.can_execute() is True
     assert cb.state == CircuitState.HALF_OPEN
+    assert cb.can_execute() is False
 
     # Success in half open -> resets to CLOSED
     cb.record_success()
