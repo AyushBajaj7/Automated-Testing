@@ -70,10 +70,33 @@ class TelegramPlatform(BasePlatform):
                     posted_url = (
                         f"https://t.me/{username}/{message_id}"
                     )
-                    public_access = await self.verify_public_access(
-                        client,
-                        posted_url,
-                    )
+                    # Conclusive public verification via Telegram public embed widget check
+                    public_access = False
+                    try:
+                        embed_url = f"https://t.me/{username}/{message_id}?embed=1"
+                        verify_resp = await client.get(
+                            embed_url,
+                            follow_redirects=True,
+                            timeout=10.0,
+                        )
+                        if getattr(verify_resp, "is_success", False) is True:
+                            html = str(getattr(verify_resp, "text", ""))
+                            if "tgme_widget_message_error" in html or "Post not found" in html:
+                                public_access = False
+                            elif "tgme_widget_message" in html or "data-post" in html:
+                                public_access = True
+                            else:
+                                public_access = False
+                        else:
+                            public_access = False
+                    except (httpx.TimeoutException, httpx.RequestError):
+                        # Fallback to generic HTTP probe only on network transport exception
+                        public_access = await self.verify_public_access(
+                            client,
+                            posted_url,
+                        )
+                    except Exception:
+                        public_access = False
 
                 posted_date = result.get("date")
                 if isinstance(posted_date, int):

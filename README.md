@@ -299,8 +299,9 @@ The service incorporates distributed systems patterns to enhance reliability and
 3. **Exponential Backoff with Full Jitter**: Provides randomized backoff utility to mitigate the thundering herd problem against rate-limited endpoints.
 4. **Bounded Concurrency Limiter (`asyncio.Semaphore`)**: Throttles active outbound sockets to prevent OS file descriptor exhaustion (`EMFILE`) under high burst traffic.
 5. **Bandwidth-Optimized Public Probe (HTTP `HEAD` with `GET` Fallback)**: Attempts lightweight HTTP `HEAD` requests before falling back to `GET` to verify public permalinks without downloading full page bodies.
-6. **Conclusive Public Verification**: Queries unauthenticated public API endpoints (Mastodon `/api/v1/statuses/{id}`, DEV.to `/api/articles/{id}`, WordPress `/wp/v2/posts/{id}`) where available to prevent false-positive login redirects.
-7. **UTF-8 Byte-Offset Calculation**: Computes exact byte indices for Bluesky AT Protocol rich text facets, ensuring multi-byte Unicode and emoji characters are accurately linked.
+6. **Conclusive Public Verification**: Queries unauthenticated public endpoints (Bluesky `com.atproto.repo.getRecord`, Mastodon `/api/v1/statuses/{id}`, DEV.to `/api/articles/{id}`, WordPress `/wp/v2/posts/{id}`, and Telegram channel embed widgets) across all five platforms to prevent false-positive login redirects and SPA application shells.
+7. **Transient vs Permanent Failure Classification**: Accurately classifies errors to ensure the Circuit Breaker trips only on transient infrastructure faults (timeouts, connection resets, 5xx outages, 429 rate limits), while permanent failures (401 bad credentials, 400 validation errors) fail fast without blocking subsequent requests.
+8. **UTF-8 Byte-Offset Calculation**: Computes exact byte indices for Bluesky AT Protocol rich text facets, ensuring multi-byte Unicode and emoji characters are accurately linked.
 
 ## Security
 

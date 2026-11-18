@@ -73,6 +73,8 @@ class BasePlatform(ABC):
 
     @staticmethod
     def get_error(response) -> str:
+        status_code = getattr(response, "status_code", None)
+        status_prefix = f"(HTTP {status_code}) " if status_code else ""
         try:
             data = response.json()
             error = (
@@ -81,7 +83,8 @@ class BasePlatform(ABC):
                 or data.get("description")
             )
             if error:
-                return str(error)[:300]
-        except ValueError:
+                return f"{status_prefix}{str(error)[:280]}"
+        except (ValueError, TypeError):
             pass
-        return response.text[:300] or "Unknown API error"
+        text = getattr(response, "text", "") or ""
+        return f"{status_prefix}{text[:280]}" if text else f"{status_prefix}Unknown API error"

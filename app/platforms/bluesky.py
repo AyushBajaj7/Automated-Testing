@@ -125,10 +125,32 @@ class BlueskyPlatform(BasePlatform):
                     f"{quote(post_id, safe='')}"
                 )
 
-                public_access = await self.verify_public_access(
-                    client,
-                    posted_url,
-                )
+                # Conclusive public verification via unauthenticated AT Protocol record endpoint
+                public_access = False
+                try:
+                    verify_resp = await client.get(
+                        f"{service_url}/xrpc/com.atproto.repo.getRecord",
+                        params={
+                            "repo": did,
+                            "collection": "app.bsky.feed.post",
+                            "rkey": post_id,
+                        },
+                        timeout=10.0,
+                    )
+                    if getattr(verify_resp, "is_success", False) is True:
+                        data = verify_resp.json()
+                        public_access = isinstance(data, dict) and data.get("uri") == post_uri
+                    else:
+                        public_access = False
+                except (httpx.TimeoutException, httpx.RequestError):
+                    # Fallback to generic HTTP probe only on network transport exception
+                    public_access = await self.verify_public_access(
+                        client,
+                        posted_url,
+                    )
+                except Exception:
+                    public_access = False
+
                 result = self.success(
                     url=posted_url,
                     public_access=public_access,

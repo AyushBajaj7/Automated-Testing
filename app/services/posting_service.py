@@ -44,6 +44,71 @@ PLATFORMS: list[BasePlatform] = [
 ]
 
 
+def is_transient_failure(error: str | None) -> bool:
+    """Classifies whether a failure represents a transient infrastructure/network condition.
+
+    Transient faults (which trip the Circuit Breaker):
+      - Network connectivity / timeouts (httpx.TimeoutException, httpx.RequestError)
+      - HTTP 5xx Server Errors (500, 502, 503, 504)
+      - HTTP 429 Too Many Requests (rate limiting)
+      - Unexpected runtime system exceptions
+
+    Permanent faults (which do NOT trip the Circuit Breaker):
+      - Missing credentials / unconfigured platforms
+      - Authentication and authorization errors (HTTP 401, 403)
+      - Bad request / client validation errors (HTTP 400, 422)
+      - Resource not found (HTTP 404)
+      - Misconfigured HTTPS or URL format
+    """
+    if not error:
+        return False
+
+    err = error.lower()
+
+    # 1. Permanent configuration and credentials issues
+    if (
+        "not configured" in err
+        or "authentication failed" in err
+        or "invalid authentication" in err
+        or "credentials" in err
+        or "must use https" in err
+        or "no valid url found" in err
+        or "must not contain credentials" in err
+    ):
+        return False
+
+    # 2. Permanent HTTP 4xx Client Errors (except 429 Too Many Requests)
+    for code in [400, 401, 403, 404, 405, 409, 410, 413, 422]:
+        if f"http {code}" in err or f"({code})" in err:
+            return False
+
+    if "unauthorized" in err or "forbidden" in err:
+        return False
+
+    # 3. Explicit transient indicators
+    if (
+        "timed out" in err
+        or "timeout" in err
+        or "network error" in err
+        or "connection" in err
+        or "connecterror" in err
+        or "readtimeout" in err
+        or "unexpected error" in err
+        or "500" in err
+        or "502" in err
+        or "503" in err
+        or "504" in err
+        or "429" in err
+        or "too many requests" in err
+        or "service unavailable" in err
+        or "bad gateway" in err
+        or "gateway timeout" in err
+    ):
+        return True
+
+    return False
+
+
 async def publish_with_retry_and_backoff(
     platform: BasePlatform,
     message: str,
@@ -64,7 +129,12 @@ async def publish_with_retry_and_backoff(
             # AWS Full Jitter Algorithm: sleep = random_between(0, min(max_delay, base * 2^attempt))
             sleep_duration = random.uniform(0, min(2.0, base_backoff * (2 ** attempt)))
             logger.info(
-                f"Transient error on {platform.name}: {exc}. Retrying in {sleep_duration:.2f}s (attempt {attempt}/{max_retries})"
+                "Transient error on %s: %s. Retrying in %.2fs (attempt %d/%d)",
+                platform.name,
+                type(exc).__name__,
+                sleep_duration,
+                attempt,
+                max_retries,
             )
             await asyncio.sleep(sleep_duration)
 
@@ -78,7 +148,10 @@ async def publish_safely(
 
     # 1. Circuit Breaker Check: Fast-fail if remote dependency is down
     if breaker and not breaker.can_execute():
-        logger.warning(f"Circuit Breaker is OPEN for {platform.name}. Failing fast without network overhead.")
+        logger.warning(
+            "Circuit Breaker is OPEN for %s. Failing fast without network overhead.",
+            platform.name,
+        )
         return platform.failure(
             f"Circuit breaker is OPEN: {platform.name} is temporarily unreachable."
         )
@@ -93,14 +166,18 @@ async def publish_safely(
             if breaker:
                 breaker.record_success()
         else:
-            # Only count as remote failure if it wasn't just "unconfigured"
-            if breaker and "not configured" not in str(result.error).lower():
+            # Trip circuit breaker only on transient infrastructure/network failures
+            if breaker and is_transient_failure(result.error):
                 breaker.record_failure()
 
         return result
 
     except Exception as exc:
-        logger.error(f"Unhandled exception while posting to {platform.name}: {exc}", exc_info=True)
+        logger.error(
+            "Unhandled exception while posting to %s: %s",
+            platform.name,
+            type(exc).__name__,
+        )
         if breaker:
             breaker.record_failure()
         return platform.failure(f"Unexpected error: {type(exc).__name__}")

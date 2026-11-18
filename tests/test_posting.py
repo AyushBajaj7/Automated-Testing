@@ -249,6 +249,12 @@ async def test_bluesky_connector_mocked_success(monkeypatch):
             return httpx.Response(404)
 
         mock_client.post = AsyncMock(side_effect=mock_post)
+        mock_client.get = AsyncMock(
+            return_value=httpx.Response(
+                200,
+                json={"uri": "at://did:plc:alice/app.bsky.feed.post/3l7test"},
+            )
+        )
         mock_client.head = AsyncMock(return_value=httpx.Response(200))
 
         platform = BlueskyPlatform()
@@ -429,6 +435,12 @@ async def test_telegram_connector_mocked_success(monkeypatch):
             )
 
         mock_client.post = AsyncMock(side_effect=mock_post)
+        mock_client.get = AsyncMock(
+            return_value=httpx.Response(
+                200,
+                text='<div class="tgme_widget_message" data-post="my_public_channel/777"><div class="tgme_widget_message_text">Hello</div></div>',
+            )
+        )
         mock_client.head = AsyncMock(return_value=httpx.Response(200))
 
         platform = TelegramPlatform()
@@ -537,3 +549,143 @@ async def test_circuit_breaker_fast_fail_in_posting_service():
 
     assert result.status == "failed"
     assert "Circuit breaker is OPEN" in result.error
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_transient_vs_permanent_classification():
+    from app.services.posting_service import (
+        is_transient_failure,
+        publish_safely,
+        CIRCUIT_BREAKERS,
+    )
+    from app.services.circuit_breaker import CircuitBreaker, CircuitState
+
+    # 1. Pure classification unit checks
+    # Permanent errors must NOT be transient
+    assert is_transient_failure("Bluesky credentials are not configured.") is False
+    assert is_transient_failure("Authentication failed: (HTTP 401) Unauthorized") is False
+    assert is_transient_failure("Publishing failed: (HTTP 403) Forbidden") is False
+    assert is_transient_failure("Publishing failed: (HTTP 400) Bad Request") is False
+    assert is_transient_failure("WordPress site URL must not contain credentials.") is False
+    assert is_transient_failure("Mastodon instance must use HTTPS.") is False
+
+    # Transient infrastructure errors MUST be transient
+    assert is_transient_failure("Bluesky API request timed out.") is True
+    assert is_transient_failure("Bluesky network error: ConnectError") is True
+    assert is_transient_failure("Publishing failed: (HTTP 500) Internal Server Error") is True
+    assert is_transient_failure("Publishing failed: (HTTP 502) Bad Gateway") is True
+    assert is_transient_failure("Publishing failed: (HTTP 503) Service Unavailable") is True
+    assert is_transient_failure("Publishing failed: (HTTP 504) Gateway Timeout") is True
+    assert is_transient_failure("Publishing failed: (HTTP 429) Too Many Requests") is True
+    assert is_transient_failure("Unexpected error: RuntimeError") is True
+
+    # 2. Integration with publish_safely: Permanent errors do NOT trip circuit breaker
+    cb_perm = CircuitBreaker("PermService", failure_threshold=3, recovery_timeout=60.0)
+    CIRCUIT_BREAKERS["PermService"] = cb_perm
+
+    class PermFailPlatform(BasePlatform):
+        name = "PermService"
+        async def publish(self, message: str) -> PlatformResult:
+            return self.failure("Authentication failed: (HTTP 401) Invalid API token")
+
+    perm_plat = PermFailPlatform()
+    for _ in range(5):
+        res = await publish_safely(perm_plat, "Message https://example.com")
+        assert res.status == "failed"
+
+    # Circuit breaker remains CLOSED because 401 is a permanent client/credential error
+    assert cb_perm.failure_count == 0
+    assert cb_perm.state == CircuitState.CLOSED
+    assert cb_perm.can_execute() is True
+
+    # 3. Integration with publish_safely: Transient errors DO trip circuit breaker
+    cb_trans = CircuitBreaker("TransService", failure_threshold=3, recovery_timeout=60.0)
+    CIRCUIT_BREAKERS["TransService"] = cb_trans
+
+    class TransFailPlatform(BasePlatform):
+        name = "TransService"
+        async def publish(self, message: str) -> PlatformResult:
+            return self.failure("Publishing failed: (HTTP 503) Service Unavailable")
+
+    trans_plat = TransFailPlatform()
+    for i in range(3):
+        res = await publish_safely(trans_plat, "Message https://example.com")
+        assert res.status == "failed"
+
+    # Circuit breaker trips to OPEN because 503 is a transient outage
+    assert cb_trans.failure_count == 3
+    assert cb_trans.state == CircuitState.OPEN
+    assert cb_trans.can_execute() is False
+
+
+@pytest.mark.asyncio
+async def test_telegram_unauthenticated_public_verification_not_found(monkeypatch):
+    monkeypatch.setattr(settings, "TELEGRAM_BOT_TOKEN", "123456:BOT_TOKEN")
+    monkeypatch.setattr(settings, "TELEGRAM_CHAT_ID", "@my_public_channel")
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__.return_value = mock_client
+
+        mock_client.post = AsyncMock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {
+                        "message_id": 999999,
+                        "date": 1763337600,
+                        "chat": {"username": "my_public_channel", "type": "channel"},
+                    },
+                },
+            )
+        )
+        # Embed endpoint returns "Post not found" widget
+        mock_client.get = AsyncMock(
+            return_value=httpx.Response(
+                200,
+                text='<div class="tgme_widget_message_error" dir="auto">Post not found</div>',
+            )
+        )
+        mock_client.head = AsyncMock(return_value=httpx.Response(404))
+
+        platform = TelegramPlatform()
+        result = await platform.publish("Check this out https://example.com")
+
+        assert result.status == "success"
+        assert result.posted_url == "https://t.me/my_public_channel/999999"
+        assert result.public_access is False
+        assert "Message sent, but a public channel URL could not be generated." in result.error
+
+
+@pytest.mark.asyncio
+async def test_bluesky_unauthenticated_public_verification_not_found(monkeypatch):
+    monkeypatch.setattr(settings, "BLUESKY_HANDLE", "alice.bsky.social")
+    monkeypatch.setattr(settings, "BLUESKY_APP_PASSWORD", "app_pass_123")
+    monkeypatch.setattr(settings, "BLUESKY_PDS_URL", "https://bsky.social")
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__.return_value = mock_client
+
+        async def mock_post(url, **kwargs):
+            if "createSession" in url:
+                return httpx.Response(200, json={"accessJwt": "jwt123", "did": "did:plc:alice"})
+            elif "createRecord" in url:
+                return httpx.Response(200, json={"uri": "at://did:plc:alice/app.bsky.feed.post/3l7test"})
+            return httpx.Response(404)
+
+        mock_client.post = AsyncMock(side_effect=mock_post)
+        # Record lookup on PDS returns 400 RecordNotFound
+        mock_client.get = AsyncMock(
+            return_value=httpx.Response(400, json={"error": "RecordNotFound", "message": "Could not locate record"})
+        )
+        mock_client.head = AsyncMock(return_value=httpx.Response(404))
+
+        platform = BlueskyPlatform()
+        result = await platform.publish("Check out our tool! https://example.com")
+
+        assert result.status == "success"
+        assert result.posted_url == "https://bsky.app/profile/alice.bsky.social/post/3l7test"
+        assert result.public_access is False
+        assert "Post created, but public access could not be verified." in result.error
